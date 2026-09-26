@@ -1,0 +1,213 @@
+name: mkvtoolnix
+title: MKVToolNix
+summary: Creates, inspects, edits and extracts from Matroska and WebM files with mkvmerge, mkvinfo, mkvpropedit and mkvextract.
+homepage: https://mkvtoolnix.download/
+# MKVToolNix, and what the programs compile in from the source tarball:
+# avilib (GPL-2.0-or-later), libebml, libmatroska and librmff
+# (LGPL-2.1-or-later), fmt, pugixml, nlohmann-json and a Base64 encoder
+# (MIT) and utf8-cpp (BSL-1.0).
+license: GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later AND MIT AND BSL-1.0
+source-release: true
+upstream:
+  source: forgejo-tag
+  server: https://codeberg.org
+  repository: mbunkus/mkvtoolnix
+  # Release tags look like release-102.0; releases before 76.0 had three
+  # parts, such as release-71.1.0.
+  tag-pattern: '^release-(\d+\.\d+(?:\.\d+)?)$'
+  version-template: '{1}'
+  versioning: semver
+  version: "102.0"
+  artifact:
+    url: https://mkvtoolnix.download/sources/mkvtoolnix-{version}.tar.xz
+    checksums:
+      url: https://mkvtoolnix.download/sources/mkvtoolnix-{version}.tar.xz.sha256
+      algorithm: sha256
+    signature: https://mkvtoolnix.download/sources/mkvtoolnix-{version}.tar.xz.sig
+    sha256: 9f0a810f17c7df8adb9064a3a41d5784399be412d19704cf080745ad7d45da30
+image:
+  entrypoint: [mkvmerge]
+  cmd: [--help]
+test:
+  - |
+    for tool in mkvmerge mkvinfo mkvextract mkvpropedit; do
+      "$tool" --version > version.txt
+      grep -Fq "$tool v$VERSION ('" version.txt || { cat version.txt >&2; exit 1; }
+    done
+  - |
+    # libebml, libmatroska, fmt and pugixml are compiled in; Qt Core, Boost
+    # and the codec libraries come from the distro.
+    for tool in mkvmerge mkvinfo mkvextract mkvpropedit; do
+      ldd "/usr/local/bin/$tool" > ldd.txt 2>&1
+      grep -q 'libQt6Core\.so' ldd.txt || { cat ldd.txt >&2; exit 1; }
+      if grep -Eq 'not found|Error|libebml|libmatroska|libfmt|libpugixml' ldd.txt; then cat ldd.txt >&2; exit 1; fi
+    done
+    ldd /usr/local/bin/mkvmerge > ldd.txt 2>&1
+    for lib in libFLAC libdvdread; do
+      grep -q "$lib\.so" ldd.txt || { echo "mkvmerge does not link $lib" >&2; exit 1; }
+    done
+  - |
+    # Subtitles in Latin-1, chapters and tags in XML, and a text attachment.
+    printf '1\n00:00:00,000 --> 00:00:00,500\nFirst\n\n2\n00:00:00,500 --> 00:00:01,000\nGr\374\337e\n\n' > latin1.srt
+    printf 'Attached to the file.\n' > notes.txt
+    cat > chapters.xml <<'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <Chapters>
+      <EditionEntry>
+        <ChapterAtom>
+          <ChapterTimeStart>00:00:00.000</ChapterTimeStart>
+          <ChapterDisplay><ChapterString>Opening</ChapterString><ChapterLanguage>eng</ChapterLanguage></ChapterDisplay>
+        </ChapterAtom>
+        <ChapterAtom>
+          <ChapterTimeStart>00:00:00.500</ChapterTimeStart>
+          <ChapterDisplay><ChapterString>Second half</ChapterString><ChapterLanguage>eng</ChapterLanguage></ChapterDisplay>
+        </ChapterAtom>
+      </EditionEntry>
+    </Chapters>
+    EOF
+    cat > tags.xml <<'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <Tags>
+      <Tag>
+        <Targets><TargetTypeValue>50</TargetTypeValue></Targets>
+        <Simple><Name>COMMENT</Name><String>Made for a test</String></Simple>
+      </Tag>
+    </Tags>
+    EOF
+    mkvmerge -o muxed.mkv --title 'Test file' --sub-charset 0:ISO-8859-1 --language 0:de latin1.srt \
+      --chapters chapters.xml --global-tags tags.xml \
+      --attachment-description 'Some notes' --attach-file notes.txt > mux.log || { cat mux.log >&2; exit 1; }
+    mkvmerge -i muxed.mkv > id.txt
+    for line in 'Track ID 0: subtitles (SubRip/SRT)' 'Chapters: 2 entries' 'Global tags: 1 entry'; do
+      grep -Fxq "$line" id.txt || { cat id.txt >&2; exit 1; }
+    done
+    # The MIME type of an attachment comes from Qt's MIME database.
+    grep -Fq "Attachment ID 1: type 'text/plain'" id.txt || { cat id.txt >&2; exit 1; }
+    mkvinfo muxed.mkv > info.txt
+    grep -Fq '+ Title: Test file' info.txt || { cat info.txt >&2; exit 1; }
+    grep -Fq '+ Codec ID: S_TEXT/UTF8' info.txt
+    mkvextract muxed.mkv tracks 0:subtitles.srt attachments 1:notes-out.txt \
+      chapters --simple chapters.txt tags tags-out.xml > extract.log || { cat extract.log >&2; exit 1; }
+    # mkvmerge converted the subtitles to UTF-8.
+    grep -Fxq "$(printf 'Gr\303\274\303\237e')" subtitles.srt || { cat subtitles.srt >&2; exit 1; }
+    grep -Fxq '00:00:00,500 --> 00:00:01,000' subtitles.srt
+    cmp notes-out.txt notes.txt
+    grep -Fxq 'CHAPTER02=00:00:00.500' chapters.txt || { cat chapters.txt >&2; exit 1; }
+    grep -Fxq 'CHAPTER02NAME=Second half' chapters.txt
+    grep -Fq '<String>Made for a test</String>' tags-out.xml || { cat tags-out.xml >&2; exit 1; }
+  - |
+    # One second of 8 kHz 16-bit mono noise as WAV, and 40 silent MPEG-1 Layer III frames.
+    head -c 16000 /dev/urandom > samples.raw
+    {
+      printf 'RIFF\244\076\000\000WAVEfmt \020\000\000\000\001\000\001\000'
+      printf '\100\037\000\000\200\076\000\000\002\000\020\000data\200\076\000\000'
+      cat samples.raw
+    } > noise.wav
+    i=0
+    while [ "$i" -lt 40 ]; do printf '\377\373\220\300'; head -c 413 /dev/zero; i=$((i + 1)); done > silence.mp3
+    printf '1\n00:00:00,000 --> 00:00:01,000\nText\n\n' > subtitles.srt
+    mkvmerge -o audio.mkv --language 0:en --track-name 0:Noise noise.wav silence.mp3 subtitles.srt > mux.log || { cat mux.log >&2; exit 1; }
+    mkvmerge -i audio.mkv > id.txt
+    for line in 'Track ID 0: audio (PCM)' 'Track ID 1: audio (MP3)' 'Track ID 2: subtitles (SubRip/SRT)'; do
+      grep -Fxq "$line" id.txt || { cat id.txt >&2; exit 1; }
+    done
+    mkvmerge -J audio.mkv > audio.json
+    for text in '"codec_id": "A_PCM/INT/LIT"' '"codec_id": "A_MPEG/L3"' '"track_name": "Noise"' '"language_ietf": "en"'; do
+      grep -Fq "$text" audio.json || { cat audio.json >&2; exit 1; }
+    done
+    mkvpropedit audio.mkv --edit info --set 'title=Edited title' \
+      --edit track:a2 --set name=Silence --set language=fr \
+      --edit track:s1 --set flag-forced=1 > propedit.log || { cat propedit.log >&2; exit 1; }
+    mkvmerge -J audio.mkv > edited.json
+    for text in '"title": "Edited title"' '"track_name": "Silence"' '"language_ietf": "fr"' '"forced_track": true'; do
+      grep -Fq "$text" edited.json || { cat edited.json >&2; exit 1; }
+    done
+    mkvextract audio.mkv tracks 0:noise-out.wav 1:silence-out.mp3 > extract.log || { cat extract.log >&2; exit 1; }
+    tail -c 16000 noise-out.wav | cmp - samples.raw
+    cmp silence-out.mp3 silence.mp3
+    mkvmerge -o subtitles-only.mkv --no-audio audio.mkv > remux.log || { cat remux.log >&2; exit 1; }
+    mkvmerge -i subtitles-only.mkv > remux.txt
+    test "$(grep -c '^Track ID' remux.txt)" = 1
+    grep -Fxq 'Track ID 0: subtitles (SubRip/SRT)' remux.txt
+examples:
+  - title: Remux an MP4 file into Matroska without re-encoding
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mkvtoolnix -o output.mkv input.mp4
+  - title: Add German subtitles to a video
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mkvtoolnix -o output.mkv input.mkv --language 0:de --track-name 0:Deutsch subtitles.de.srt
+  - title: List the tracks, chapters and attachments of a file as JSON
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mkvtoolnix -J input.mkv
+  - title: Change the title and the language of the first audio track in place
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint mkvpropedit ghcr.io/randomcontainers/mkvtoolnix input.mkv --edit info --set "title=New title" --edit track:a1 --set language=en
+  - title: Extract a subtitle track
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint mkvextract ghcr.io/randomcontainers/mkvtoolnix input.mkv tracks 2:subtitles.srt
+  - title: Convert the first audio track to Opus with FFmpeg (default image)
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint ffmpeg ghcr.io/randomcontainers/mkvtoolnix -i input.mkv -map 0:a:0 -c:a libopus audio.opus
+combos:
+  - with: [ffmpeg, mediainfo]
+    default: true
+    base: ffmpeg
+    summary: MKVToolNix with FFmpeg and MediaInfo, for converting, remuxing and checking video files in one image.
+    test:
+      - |
+        export SVT_LOG=1
+        run() { ffmpeg -hide_banner -loglevel error -y "$@"; }
+        frames() { ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$1"; }
+        check() {
+          got="$(mediainfo --Output="$2" "$1")"
+          [ "$got" = "$3" ] || { echo "$1 $2: expected '$3', got '$got'" >&2; exit 1; }
+        }
+        v=testsrc2=size=320x240:rate=25:duration=2
+        a=sine=frequency=1000:duration=2
+        run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libx264 -g 25 -c:a aac input.mp4
+        run -f lavfi -i "$a" -c:a flac commentary.flac
+        run -f lavfi -i "$a" -c:a libvorbis music.ogg
+        printf '1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,000 --> 00:00:02,000\nWorld\n\n' > subtitles.srt
+        mkvmerge -o remux.mkv --title 'Remux test' input.mp4 \
+          --language 0:de --track-name 0:Commentary commentary.flac \
+          --language 0:fr music.ogg --language 0:en subtitles.srt > mux.log || { cat mux.log >&2; exit 1; }
+        mkvmerge -J remux.mkv > remux.json
+        for id in V_MPEG4/ISO/AVC A_AAC A_FLAC A_VORBIS S_TEXT/UTF8; do
+          grep -Fq "\"codec_id\": \"$id\"" remux.json || { cat remux.json >&2; exit 1; }
+        done
+        streams="$(ffprobe -v error -show_entries stream=codec_name -of csv=p=0 remux.mkv | tr '\n' ' ')"
+        [ "$streams" = 'h264 aac flac vorbis subrip ' ] || { echo "ffprobe found: $streams" >&2; exit 1; }
+        test "$(ffprobe -v error -show_entries format_tags=title -of csv=p=0 remux.mkv)" = 'Remux test'
+        test "$(ffprobe -v error -select_streams a:1 -show_entries stream_tags=title -of csv=p=0 remux.mkv)" = Commentary
+        ffmpeg -hide_banner -loglevel error -xerror -i remux.mkv -map 0:v -map 0:a -f null - 2> decode.log
+        if [ -s decode.log ]; then cat decode.log >&2; exit 1; fi
+        check remux.mkv 'General;%Format%' Matroska
+        check remux.mkv 'Video;%Format% %Width%x%Height%' 'AVC 320x240'
+        check remux.mkv 'Audio;%Format%,' 'AAC,FLAC,Vorbis,'
+        check remux.mkv 'Text;%Format%' UTF-8
+        mkvextract remux.mkv tracks 0:video.h264 2:commentary-out.flac > extract.log || { cat extract.log >&2; exit 1; }
+        test "$(frames video.h264)" = "$(frames input.mp4)"
+        test "$(ffmpeg -v error -i commentary-out.flac -f md5 -)" = "$(ffmpeg -v error -i commentary.flac -f md5 -)"
+        # mkvmerge splits FLAC only behind a hack that leaves the track undecodable, so leave it out.
+        mkvmerge -o part.mkv --split duration:00:00:00.800 --audio-tracks '!2' remux.mkv > split.log || { cat split.log >&2; exit 1; }
+        test -f part-002.mkv
+        total=0
+        for part in part-*.mkv; do total=$((total + $(frames "$part"))); done
+        test "$total" = "$(frames remux.mkv)"
+      - |
+        export SVT_LOG=1
+        run() { ffmpeg -hide_banner -loglevel error -y "$@"; }
+        frames() { ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$1"; }
+        v=testsrc2=size=320x240:rate=25:duration=1
+        a=sine=frequency=1000:duration=1
+        run -f lavfi -i "$v" -c:v libx265 -x265-params log-level=error hevc.mp4
+        run -f lavfi -i "$v" -c:v libsvtav1 -preset 8 av1.mp4
+        run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus vp9.webm
+        for pair in hevc.mp4:V_MPEGH/ISO/HEVC av1.mp4:V_AV1; do
+          in="${pair%%:*}"
+          out="${in%.mp4}.mkv"
+          mkvmerge -o "$out" "$in" > mux.log || { cat mux.log >&2; exit 1; }
+          mkvmerge -J "$out" > "$out.json"
+          grep -Fq "\"codec_id\": \"${pair#*:}\"" "$out.json" || { cat "$out.json" >&2; exit 1; }
+          test "$(frames "$out")" = "$(frames "$in")"
+        done
+        mkvmerge --webm -o remuxed.webm vp9.webm > mux.log || { cat mux.log >&2; exit 1; }
+        mkvmerge -J remuxed.webm > webm.json
+        grep -Fq '"codec_id": "V_VP9"' webm.json
+        grep -Fq '"codec_id": "A_OPUS"' webm.json
+        test "$(mediainfo --Output='General;%Format%' remuxed.webm)" = WebM
+        test "$(frames remuxed.webm)" = "$(frames vp9.webm)"
