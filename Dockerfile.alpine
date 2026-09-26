@@ -1,0 +1,129 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS source
+RUN apk add --no-cache gpgv xz
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://mkvtoolnix.download/sources/mkvtoolnix-${VERSION}.tar.xz /src/
+ADD https://mkvtoolnix.download/sources/mkvtoolnix-${VERSION}.tar.xz.sig /src/
+# Moritz Bunkus's key, fingerprint D919 9745 B054 5F2E 8197 062B 0F92 290A 445B 9007,
+# with the signing subkey 3301 A29D 88D0 1A0C F999 954F 74AF 00AD F2E3 2C85
+COPY keys/mkvtoolnix-release.gpg /tmp/mkvtoolnix-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/mkvtoolnix-release.gpg "mkvtoolnix-${VERSION}.tar.xz.sig" "mkvtoolnix-${VERSION}.tar.xz"; \
+    mkdir mkvtoolnix; \
+    tar -xJf "mkvtoolnix-${VERSION}.tar.xz" -C mkvtoolnix --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+RUN apk add --no-cache \
+      boost-dev \
+      build-base \
+      docbook-xsl \
+      flac-dev \
+      gmp-dev \
+      libdvdread-dev \
+      libogg-dev \
+      libvorbis-dev \
+      libxslt \
+      pkgconf \
+      qt6-qtbase-dev \
+      ruby \
+      ruby-rake \
+      scanelf \
+      zlib-dev
+COPY --link --from=source /src/mkvtoolnix /src/mkvtoolnix
+WORKDIR /src/mkvtoolnix
+ARG JOBS
+ARG VERSION
+# --disable-gui builds only the command-line programs, which still link Qt
+# Core. libebml, libmatroska, fmt, pugixml, nlohmann-json and utf8-cpp are
+# compiled in from the tarball on both distros, so both images run the same
+# code; the loop stops the build if configure picked anything else.
+# ac_cv_fmt=no keeps the bundled fmt when the distro's is installed, as on
+# Alpine, where qt6-qtbase-dev pulls in fmt-dev through mariadb-dev. configure
+# requires xsltproc and the DocBook stylesheets for the man pages, which are
+# not built. Translations are left out because the images run with
+# LANG=C.UTF-8.
+RUN set -eu; \
+    set -- \
+      --prefix=/usr/local \
+      --disable-gui \
+      --disable-update-check \
+      --without-gettext \
+      ac_cv_fmt=no; \
+    ./configure "$@" | tee /tmp/configure.log; \
+    echo "configure: $*" > /tmp/configure-options; \
+    for lib in EBML_MATROSKA FMT NLOHMANN_JSON PUGIXML UTF8CPP; do \
+      grep -qx "${lib}_INTERNAL = yes" build-config \
+        || { echo "configure did not choose the bundled ${lib}" >&2; exit 1; }; \
+    done; \
+    grep -qx 'USE_DVDREAD = yes' build-config; \
+    grep -Eq '^FLAC_LIBS = .*-lFLAC' build-config; \
+    rake -j"${JOBS:-$(nproc)}" apps:cli; \
+    rake apps:strip; \
+    rake install:programs DESTDIR=/out; \
+    /out/usr/local/bin/mkvmerge --version > /tmp/mkvmerge-version; \
+    grep -Fq "mkvmerge v${VERSION} (" /tmp/mkvmerge-version
+
+ARG BASE_IMAGE
+# runtime-deps lists the so: names the binaries need, minus the libraries
+# built here, plus the packages in runtime-deps.alpine.
+RUN --mount=type=bind,source=runtime-deps.alpine,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    meta=/out/usr/local/share/randomcontainers/mkvtoolnix; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYING "$meta/licenses/COPYING"; \
+    cp lib/libebml/LICENSE.LGPL "$meta/licenses/LICENSE.libebml"; \
+    cp lib/libmatroska/LICENSE.LGPL "$meta/licenses/LICENSE.libmatroska"; \
+    cp lib/librmff/COPYING "$meta/licenses/COPYING.librmff"; \
+    cp lib/fmt/LICENSE "$meta/licenses/LICENSE.fmt"; \
+    cp lib/pugixml/readme.txt "$meta/licenses/LICENSE.pugixml"; \
+    { \
+      awk '/^\/\// { print; next } { exit }' lib/nlohmann-json/include/nlohmann/json.hpp; \
+      echo; \
+      awk '/^## / { if (p) exit; p = ($0 == "## License") } p && !/^<img /' lib/nlohmann-json/README.md; \
+    } > "$meta/licenses/NOTICE.nlohmann-json"; \
+    awk '/\/\*/ { c = 1 } { print } c && /\*\// { exit }' lib/utf8-cpp/source/utf8/core.h > "$meta/licenses/NOTICE.utf8-cpp"; \
+    awk '/\/\*/ { c = 1 } c { print } c && /\*\// { exit }' lib/avilib-0.6.10/avilib.c > "$meta/licenses/NOTICE.avilib"; \
+    awk '/\/\*/ { c = 1 } c { print } c && /\*\// { exit }' src/common/base64.cpp > "$meta/licenses/NOTICE.base64"; \
+    for f in "$meta"/licenses/*; do test -s "$f"; done; \
+    for f in NOTICE.base64 NOTICE.nlohmann-json; do grep -q 'Permission is hereby granted' "$meta/licenses/$f"; done; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://mkvtoolnix.download/sources/mkvtoolnix-${VERSION}.tar.xz" \
+      "https://mkvtoolnix.download/sources/mkvtoolnix-${VERSION}.tar.xz.sig" \
+      "https://github.com/randomcontainers/mkvtoolnix/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(c++ --version | head -n 1)"; \
+      cat /tmp/configure-options; \
+      sed -n "/qmake6's version/p" /tmp/configure.log; \
+      grep -E '^([A-Z0-9_]+_INTERNAL|USE_DVDREAD|FLAC_LIBS) = ' build-config; \
+      sed -n '/^Optional features that are built/,$p' /tmp/configure.log; \
+      cat /tmp/mkvmerge-version; \
+    } > "$meta/buildinfo"; \
+    scanelf --needed --nobanner --format '%n#p' --recursive /out/usr/local | tr ',' '\n' | sort -u > /tmp/needed; \
+    while read -r so; do \
+      if [ -n "$so" ] && [ -z "$(find /out -name "$so" -print -quit)" ]; then echo "so:$so"; fi; \
+    done < /tmp/needed > /tmp/elf-deps; \
+    test -s /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    xargs apk add --no-cache ca-certificates tini < /usr/local/share/randomcontainers/mkvtoolnix/runtime-deps; \
+    addgroup -g 1000 app; \
+    adduser -D -u 1000 -G app app; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "mkvmerge"]
+CMD ["--help"]
