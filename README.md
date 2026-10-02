@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   ghcr.io/randomcontainers/mkvtoolnix -o output.mkv input.mp4
 ```
 
-The same images can also be pulled as `randomcontainers.com/mkvtoolnix`.
-
 mkvmerge copies the tracks without re-encoding them. File options such as `--language 0:de` apply to the file name that follows them, and their track IDs count from 0 in each file. Add German subtitles to a video:
 
 ```sh
