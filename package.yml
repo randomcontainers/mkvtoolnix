@@ -17,14 +17,14 @@ upstream:
   tag-pattern: '^release-(\d+\.\d+(?:\.\d+)?)$'
   version-template: '{1}'
   versioning: semver
-  version: "102.0"
+  version: "103.0"
   artifact:
     url: https://mkvtoolnix.download/sources/mkvtoolnix-{version}.tar.xz
     checksums:
       url: https://mkvtoolnix.download/sources/mkvtoolnix-{version}.tar.xz.sha256
       algorithm: sha256
     signature: https://mkvtoolnix.download/sources/mkvtoolnix-{version}.tar.xz.sig
-    sha256: 9f0a810f17c7df8adb9064a3a41d5784399be412d19704cf080745ad7d45da30
+    sha256: d609bc395c409eade05d0a3a5aedd26e09739e232ed03b0f937cf8bd9448c590
 image:
   entrypoint: [mkvmerge]
   cmd: [--help]
